@@ -946,7 +946,7 @@ class DownloadDelegate:
             raise RuntimeError(
                 f"{throttle}; sparse Git transport failed: {exc}. "
                 "Retry after GitHub quota recovery; for private repositories, "
-                "verify GITHUB_APM_PAT can read the repository."
+                "verify your GitHub CLI login or GITHUB_APM_PAT can read the repository."
             ) from exc
 
     # ------------------------------------------------------------------

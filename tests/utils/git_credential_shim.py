@@ -224,6 +224,26 @@ def main():
             remotes.append(remote)
         if authorization is not None:
             authorizations.append(authorization)
+    # Sparse transports add origin first, then fetch it by name. Translate
+    # the original host-scoped header for that already-rewritten remote too.
+    if args[:1] == ["fetch"] and not remotes:
+        origin = subprocess.run(
+            [os.environ["APM_TEST_REAL_GIT"], "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        mapping = json.loads(os.environ["APM_TEST_GIT_REMOTE_MAP"])
+        for repository_path, target in mapping.items():
+            if origin != target:
+                continue
+            _rewritten, remote, authorization = _rewrite_url(
+                "https://github.com/" + repository_path + ".git"
+            )
+            remotes.append(remote)
+            if authorization is not None:
+                authorizations.append(authorization)
+            break
     rewritten_args = _strip_dumb_http_incompatible_options(rewritten_args)
     for target, authorization in reversed(authorizations):
         rewritten_args[:0] = ["-c", f"http.{target}.extraHeader={authorization}"]
@@ -303,6 +323,10 @@ with path.open("a", encoding="utf-8", newline="\n") as handle:
         )
         + "\n"
     )
+token = os.environ.get("APM_TEST_GH_CREDENTIAL")
+if token:
+    print(token)
+    raise SystemExit(0)
 raise SystemExit(1)
 """
 
@@ -339,6 +363,7 @@ class GitCredentialShimFactory:
         real_git: Path,
         remote_map: dict[str, str],
         credential: str = "fixture-private-token",
+        gh_credential: str | None = None,
     ) -> GitCredentialShim:
         """Write shims and return their complete subprocess environment."""
         self._root.mkdir(parents=True, exist_ok=False)
@@ -365,6 +390,9 @@ class GitCredentialShimFactory:
             sort_keys=True,
         )
         environment["APM_TEST_GIT_CREDENTIAL"] = credential
+        environment.pop("APM_TEST_GH_CREDENTIAL", None)
+        if gh_credential is not None:
+            environment["APM_TEST_GH_CREDENTIAL"] = gh_credential
         environment["APM_TEST_GIT_SHIM_LOG"] = str(log_path)
         git_exec_path = subprocess.run(
             (str(real_git), "--exec-path"),

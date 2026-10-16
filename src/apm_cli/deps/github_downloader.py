@@ -1038,19 +1038,26 @@ class GitHubPackageDownloader:
         # Download the file content. A confirmed API throttle is
         # indeterminate, not an accessibility failure, so select the one
         # sparse-Git fallback and use its observed commit for lock provenance.
+        throttle_error: GitHubThrottleError | None = None
         try:
             file_content = self.download_raw_file(dep_ref, dep_ref.virtual_path, ref)
         except GitHubThrottleError as throttle:
+            throttle_error = throttle
+        except RuntimeError as e:
+            raise RuntimeError(f"Failed to download virtual package: {e}") from e
+
+        if throttle_error is not None:
+            # Git is a new attempt. Run outside the API exception handler so
+            # Python does not attach its throttle as incidental __context__ to
+            # a fresh Git auth challenge and suppress credential resolution.
             fetched = self._strategies.download_github_file_via_throttle_fallback(
                 dep_ref,
                 dep_ref.virtual_path,
                 ref,
-                throttle,
+                throttle_error,
             )
             file_content = fetched.content
             resolved_commit = fetched.resolved_commit
-        except RuntimeError as e:
-            raise RuntimeError(f"Failed to download virtual package: {e}") from e
 
         # Update progress - processing
         if progress_obj and progress_task_id is not None:

@@ -14,7 +14,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from apm_cli.deps.git_file_transport import GitFileFetchResult
+from apm_cli.core.auth import AuthResolver
+from apm_cli.core.token_manager import GitHubTokenManager
+from apm_cli.deps.git_file_transport import GitFileFetchResult, GitFileTransportError
 from apm_cli.deps.github_downloader import GitHubPackageDownloader
 from apm_cli.deps.github_rate_limit import GitHubThrottle, GitHubThrottleError
 from apm_cli.models.apm_package import DependencyReference, GitReferenceType
@@ -139,6 +141,70 @@ class TestSingleFileShaResolution:
         assert pkg_info.resolved_reference is not None
         assert pkg_info.resolved_reference.resolved_commit == self.SHA
         fallback.assert_called_once_with(dep, dep.virtual_path, "main", throttle)
+
+
+@pytest.mark.parametrize("git_failure", ["auth", "network", "wrapped-throttle", "rejected"])
+def test_throttle_recovery_classifies_only_the_new_git_attempt(
+    tmp_path: Path, git_failure: str
+) -> None:
+    """A prior API throttle cannot govern auth, but a current wrapped throttle must."""
+    manager = MagicMock(spec=GitHubTokenManager)
+    manager.setup_environment.return_value = {}
+    manager.get_token_for_purpose.return_value = None
+    manager.resolve_credential_from_gh_cli.return_value = "existing-gh-token"
+    resolver = AuthResolver(token_manager=manager)
+    downloader = GitHubPackageDownloader(auth_resolver=resolver)
+    manager.reset_mock()
+    dep = _make_virtual_file_dep(host="github.com")
+    throttle = GitHubThrottleError(GitHubThrottle(403, "remaining-zero"), "github.com")
+    attempts: list[bool] = []
+
+    def transport_factory(*_args, **kwargs):
+        env = kwargs["git_env"]
+        authenticated = any(value.startswith("Authorization: ") for value in env.values())
+        attempts.append(authenticated)
+
+        def fetch(_path):
+            if git_failure == "network":
+                raise GitFileTransportError("could not resolve host: github.com")
+            if git_failure == "wrapped-throttle":
+                try:
+                    raise GitHubThrottleError(GitHubThrottle(429, "http-429"), "github.com")
+                except GitHubThrottleError as current:
+                    raise GitFileTransportError("authentication failed") from current
+            if not authenticated or git_failure == "rejected":
+                raise GitFileTransportError("fatal: Authentication failed")
+            return GitFileFetchResult(_file_content(), TestSingleFileShaResolution.SHA)
+
+        transport = MagicMock()
+        transport.fetch_file_with_commit.side_effect = fetch
+        return transport
+
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch.object(downloader._refs, "resolve_commit_sha_for_ref", return_value=None),
+        patch.object(downloader, "download_raw_file", side_effect=throttle),
+        patch(
+            "apm_cli.deps.download_strategies.GitSparseFileTransport", side_effect=transport_factory
+        ),
+    ):
+        if git_failure == "auth":
+            package = downloader.download_virtual_file_package(dep, tmp_path / "package")
+            assert package.resolved_reference.resolved_commit == TestSingleFileShaResolution.SHA
+        else:
+            with pytest.raises(
+                RuntimeError, match=r"GitHub API throttle.*sparse Git transport failed"
+            ):
+                downloader.download_virtual_file_package(dep, tmp_path / "package")
+
+    if git_failure in ("auth", "rejected"):
+        assert attempts == [False, True]
+        manager.resolve_credential_from_gh_cli.assert_called_once_with("github.com")
+    else:
+        assert attempts == [False]
+        manager.get_token_for_purpose.assert_not_called()
+        manager.resolve_credential_from_gh_cli.assert_not_called()
+    manager.resolve_credential_from_git.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
