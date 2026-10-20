@@ -257,8 +257,9 @@ def test_public_fallback_uses_normal_git_environment() -> None:
     assert transport_factory.call_args.kwargs["git_env"] == {"NORMAL_GIT": "1"}
 
 
-def test_sparse_transport_failure_reports_the_throttle_and_transport_error() -> None:
-    """The fallback never downgrades a confirmed throttle to generic inaccessible."""
+def test_sparse_transport_failure_reports_transport_error_without_throttle() -> None:
+    """The fallback error message should not include the throttle to avoid contaminating
+    the exception chain for credential classification."""
     delegate = DownloadDelegate(_host(token=None))
     throttle = GitHubThrottleError(GitHubThrottle(429, "http-429"), "github.com")
 
@@ -276,7 +277,9 @@ def test_sparse_transport_failure_reports_the_throttle_and_transport_error() -> 
             )
 
     message = str(exc_info.value)
-    assert "GitHub API throttle" in message
+    # The throttle should NOT be in the error message to avoid contaminating
+    # the exception chain for credential classification
+    assert "GitHub API throttle" not in message
     assert "sparse Git transport failed" in message
     assert "Retry after GitHub quota recovery" in message
     assert "private-token" not in message
